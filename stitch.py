@@ -18,7 +18,7 @@ def download_folder_contents(folder_id, output_dir):
     gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
 def notify_n8n(dest_folder_id):
-    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook-test/416a64ff-7e1c-45a3-af73-dc413876305e"
+    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
     file_link = f"https://drive.google.com/drive/folders/{dest_folder_id}"
     
     payload = {
@@ -27,7 +27,7 @@ def notify_n8n(dest_folder_id):
         "video_folder": file_link
     }
     
-    print("Notifying n8n via webhook...")
+    print("Notifying n8n via production webhook...")
     try:
         response = requests.post(webhook_url, json=payload)
         print(f"Webhook response status: {response.status_code}")
@@ -89,7 +89,7 @@ def main():
 
     print("Stitching complete!")
 
-    # 5. Trigger n8n Webhook so it can proceed to YouTube upload
+    # 5. Trigger your production n8n Webhook
     notify_n8n(dest_folder_id)
 
 if __name__ == "__main__":
