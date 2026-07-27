@@ -1,7 +1,13 @@
 import os
+import json
 import subprocess
 import requests
 import gdown
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+DEST_FOLDER_ID = "1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
 
 def run_cmd(command):
     print(f"Running: {' '.join(command)}")
@@ -17,54 +23,69 @@ def download_folder_contents(folder_id, output_dir):
     url = f"https://drive.google.com/drive/folders/{folder_id}"
     gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
-def notify_n8n(video_path):
+def get_drive_service():
+    creds_json = os.environ["GDRIVE_SERVICE_ACCOUNT_JSON"]
+    creds_info = json.loads(creds_json)
+    credentials = service_account.Credentials.from_service_account_info(
+        creds_info,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+    return build("drive", "v3", credentials=credentials)
+
+def upload_to_drive(file_path, folder_id, file_name):
+    print(f"Uploading {file_path} to Drive folder {folder_id}...")
+    service = get_drive_service()
+    file_metadata = {
+        "name": file_name,
+        "parents": [folder_id]
+    }
+    media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
+    uploaded = service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id, webViewLink"
+    ).execute()
+    file_id = uploaded.get("id")
+    web_link = uploaded.get("webViewLink")
+    print(f"Upload complete. File ID: {file_id}")
+    return file_id, web_link
+
+def notify_n8n(file_id, web_link):
     webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
-
-    if not os.path.exists(video_path):
-        raise RuntimeError(f"Cannot notify n8n — file not found: {video_path}")
-
-    file_size = os.path.getsize(video_path)
-    print(f"Uploading {video_path} ({file_size / (1024*1024):.1f} MB) to n8n webhook...")
-
-    with open(video_path, "rb") as f:
-        files = {
-            "data": (os.path.basename(video_path), f, "video/mp4")
-        }
-        data = {
-            "status": "success",
-            "message": "Video stitching complete. Ready for YouTube upload!"
-        }
-        try:
-            response = requests.post(webhook_url, files=files, data=data, timeout=600)
-            print(f"Webhook response status: {response.status_code}")
-            if response.status_code >= 400:
-                print(f"Webhook response body: {response.text}")
-                raise RuntimeError(f"n8n webhook returned {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            print(f"Error: Failed to reach n8n webhook: {e}")
-            raise
+    payload = {
+        "status": "success",
+        "message": "Video stitching complete. Ready for YouTube upload!",
+        "file_id": file_id,
+        "video_link": web_link
+    }
+    print("Notifying n8n via production webhook...")
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=30)
+        print(f"Webhook response status: {response.status_code}")
+        if response.status_code >= 400:
+            print(f"Webhook response body: {response.text}")
+            raise RuntimeError(f"n8n webhook returned {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Error: Failed to reach n8n webhook: {e}")
+        raise
 
 def main():
     video_folder_id = os.getenv("VIDEO_FOLDER_ID", "1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA")
     voice_folder_id = os.getenv("VOICE_FOLDER_ID", "1ph8ZfknTc5N5GGVkCW8rHQOS_NAFgG39")
 
-    # 1. Download source files
     download_folder_contents(video_folder_id, "video_downloads")
     download_folder_contents(voice_folder_id, "voice_downloads")
 
-    # 2. Sort video parts naturally
     video_files = []
     for root, dirs, files in os.walk("video_downloads"):
         for file in files:
             if file.lower().endswith(".mp4"):
                 video_files.append(os.path.join(root, file))
-
     video_files.sort()
 
     if not video_files:
         raise RuntimeError("No video parts found in the downloaded folder!")
 
-    # 3. Concatenate video parts
     list_filename = "file_list.txt"
     with open(list_filename, "w") as f:
         for vf in video_files:
@@ -76,7 +97,6 @@ def main():
         "-i", list_filename, "-c", "copy", "combined_video.mp4"
     ])
 
-    # 4. Find audio file
     audio_file = None
     for root, dirs, files in os.walk("voice_downloads"):
         for file in files:
@@ -97,8 +117,8 @@ def main():
     ])
     print("Stitching complete!")
 
-    # 5. Push the finished file straight to n8n
-    notify_n8n("final_master_output.mp4")
+    file_id, web_link = upload_to_drive("final_master_output.mp4", DEST_FOLDER_ID, "full story.mp4")
+    notify_n8n(file_id, web_link)
 
 if __name__ == "__main__":
     main()
