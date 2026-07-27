@@ -77,3 +77,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+import requests
+import json
+
+def notify_n8n():
+    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook-test/416a64ff-7e1c-45a3-af73-dc413876305e"
+    
+    # Generate the direct web view link for the file in Google Drive
+    file_link = "https://drive.google.com/drive/folders/1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
+    
+    payload = {
+        "status": "success",
+        "message": "Video stitching complete!",
+        "video_folder": file_link
+    }
+    
+    print("Notifying n8n that video processing is complete...")
+    response = requests.post(webhook_url, json=payload)
+    print(f"Webhook response status: {response.status_code}")
+
+if __name__ == "__main__":
+    # ... (your downloading, ffmpeg merging runs here) ...
+    
+    # Call this at the very end of main()
+    notify_n8n()
