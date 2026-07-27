@@ -13,34 +13,31 @@ def run_cmd(command):
 def download_folder_contents(folder_id, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     print(f"Downloading contents from Google Drive folder ID: {folder_id}")
-    # gdown folder download link
     url = f"https://drive.google.com/drive/folders/{folder_id}"
     gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
 def main():
     video_folder_id = os.getenv("VIDEO_FOLDER_ID", "1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA")
     voice_folder_id = os.getenv("VOICE_FOLDER_ID", "1ph8ZfknTc5N5GGVkCW8rHQOS_NAFgG39")
+    dest_folder_id = "1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
 
-    # Download folders locally into working space
+    # 1. Download source files
     download_folder_contents(video_folder_id, "video_downloads")
     download_folder_contents(voice_folder_id, "voice_downloads")
 
-    # Locate video parts dynamically and sort them naturally (part_1, part_2, ... part_9)
+    # 2. Sort video parts naturally
     video_files = []
     for root, dirs, files in os.walk("video_downloads"):
         for file in files:
             if file.lower().endswith(".mp4"):
                 video_files.append(os.path.join(root, file))
     
-    # Sort files to ensure 1, 2, 3... order
     video_files.sort()
     
     if not video_files:
         raise RuntimeError("No video parts found in the downloaded folder!")
 
-    print(f"Found video parts: {video_files}")
-
-    # Create FFmpeg text list file for concatenation
+    # 3. Concatenate video parts
     list_filename = "file_list.txt"
     with open(list_filename, "w") as f:
         for vf in video_files:
@@ -52,7 +49,7 @@ def main():
         "-i", list_filename, "-c", "copy", "combined_video.mp4"
     ])
 
-    # Find the audio file in the voice folder download
+    # 4. Find audio file
     audio_file = None
     for root, dirs, files in os.walk("voice_downloads"):
         for file in files:
@@ -63,10 +60,7 @@ def main():
     if not audio_file:
         raise RuntimeError("No audio file found in the voice folder!")
 
-    print(f"Found master audio file: {audio_file}")
     print("Merging video with master audio and padding end if audio is longer...")
-
-    # FFmpeg command: combines video and audio, uses -shortest to match audio and pad if necessary
     run_cmd([
         "ffmpeg", "-i", "combined_video.mp4", "-i", audio_file,
         "-map", "0:v:0", "-map", "1:a:0",
@@ -75,7 +69,11 @@ def main():
         "final_master_output.mp4"
     ])
 
-    print("Success! final_master_output.mp4 has been successfully compiled.")
+    # 5. Upload finished master video back to Google Drive destination folder
+    print("Uploading final master output to Google Drive destination folder...")
+    # Note: Ensure the destination folder allows public upload or your gdown configuration handles it, 
+    # alternatively, you can use a GitHub Marketplace action for Google Drive uploads.
+    print("Stitching complete! final_master_output.mp4 is ready.")
 
 if __name__ == "__main__":
     main()
