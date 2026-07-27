@@ -1,5 +1,6 @@
-import subprocess
 import os
+import subprocess
+import gdown
 
 def run_cmd(command):
     print(f"Running: {' '.join(command)}")
@@ -9,41 +10,72 @@ def run_cmd(command):
         raise RuntimeError("FFmpeg command failed.")
     return result.stdout
 
-def main():
-    print("Starting video and audio stitching pipeline...")
+def download_folder_contents(folder_id, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Downloading contents from Google Drive folder ID: {folder_id}")
+    # gdown folder download link
+    url = f"https://drive.google.com/drive/folders/{folder_id}"
+    gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
-    # Step 1: Create a text file listing all parts in order for FFmpeg concat demuxer
+def main():
+    video_folder_id = os.getenv("VIDEO_FOLDER_ID", "1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA")
+    voice_folder_id = os.getenv("VOICE_FOLDER_ID", "1ph8ZfknTc5N5GGVkCW8rHQOS_NAFgG39")
+
+    # Download folders locally into working space
+    download_folder_contents(video_folder_id, "video_downloads")
+    download_folder_contents(voice_folder_id, "voice_downloads")
+
+    # Locate video parts dynamically and sort them naturally (part_1, part_2, ... part_9)
+    video_files = []
+    for root, dirs, files in os.walk("video_downloads"):
+        for file in files:
+            if file.lower().endswith(".mp4"):
+                video_files.append(os.path.join(root, file))
+    
+    # Sort files to ensure 1, 2, 3... order
+    video_files.sort()
+    
+    if not video_files:
+        raise RuntimeError("No video parts found in the downloaded folder!")
+
+    print(f"Found video parts: {video_files}")
+
+    # Create FFmpeg text list file for concatenation
     list_filename = "file_list.txt"
     with open(list_filename, "w") as f:
-        for i in range(1, 10): # from part_1 to part_9 based on your files
-            filename = f"part_{i}.mp4"
-            if os.path.exists(filename):
-                f.write(f"file '{filename}'\n")
-            else:
-                print(f"Warning: {filename} not found!")
+        for vf in video_files:
+            f.write(f"file '{os.path.abspath(vf)}'\n")
 
-    print("Concatenating video parts...")
-    # Concat all video parts into one intermediate file without re-encoding (super fast)
+    print("Concatenating video parts together...")
     run_cmd([
         "ffmpeg", "-f", "concat", "-safe", "0", 
         "-i", list_filename, "-c", "copy", "combined_video.mp4"
     ])
 
-    print("Merging with master audio and padding end if necessary...")
-    # This maps the long audio, adds a black screen pad if audio is longer than video, 
-    # and cuts/matches the exact duration of the audio track.
-    audio_file = "tts (2).mp3" # Your master audio file name
-    output_file = "final_master_output.mp4"
+    # Find the audio file in the voice folder download
+    audio_file = None
+    for root, dirs, files in os.walk("voice_downloads"):
+        for file in files:
+            if file.lower().endswith((".mp3", ".wav", ".m4a")):
+                audio_file = os.path.join(root, file)
+                break
+    
+    if not audio_file:
+        raise RuntimeError("No audio file found in the voice folder!")
 
+    print(f"Found master audio file: {audio_file}")
+    print("Merging video with master audio and padding end if audio is longer...")
+
+    # FFmpeg command: combines video and audio, uses -shortest to match audio and pad if necessary
     run_cmd([
         "ffmpeg", "-i", "combined_video.mp4", "-i", audio_file,
         "-map", "0:v:0", "-map", "1:a:0",
-        "-shortest", # Ensures video matches audio duration (pads or cuts cleanly)
+        "-shortest", 
         "-c:v", "libx264", "-preset", "fast", "-c:a", "aac",
-        output_output
+        "final_master_output.mp4"
     ])
 
-    print(f"Success! Final video generated: {output_file}")
+    print("Success! final_master_output.mp4 has been successfully compiled.")
 
 if __name__ == "__main__":
     main()
