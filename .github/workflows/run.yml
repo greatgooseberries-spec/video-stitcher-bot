@@ -1,0 +1,25 @@
+name: Automated Video Stitcher
+
+on:
+  workflow_dispatch: # Allows you to click a "Run" button manually anytime you want
+
+jobs:
+  build:
+    runs-on: ubuntu-latest # Gives you a powerful cloud machine with plenty of RAM & CPU
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Ensure FFmpeg is installed
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Run Python Stitching Script
+      run: python stitch.py
