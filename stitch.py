@@ -18,7 +18,7 @@ def download_folder_contents(folder_id, output_dir):
     gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
 def notify_n8n(dest_folder_id):
-    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook-test/416a64ff-7e1c-45a3-af73-dc413876305e"
+    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
     file_link = f"https://drive.google.com/drive/folders/{dest_folder_id}"
     
     payload = {
