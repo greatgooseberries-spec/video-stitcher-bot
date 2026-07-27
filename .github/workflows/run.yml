@@ -1,5 +1,4 @@
 name: Automated Video Stitcher
-
 on:
   workflow_dispatch:
     inputs:
@@ -11,28 +10,24 @@ on:
         description: 'Google Drive Voice Folder ID'
         required: true
         default: '1ph8ZfknTc5N5GGVkCW8rHQOS_NAFgG39'
-
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - name: Check out repository
       uses: actions/checkout@v4
-
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-
     - name: Install dependencies & FFmpeg
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg
-        pip install gdown requests
-
+        pip install gdown requests google-api-python-client google-auth
     - name: Run Python Stitching Script
       env:
         VIDEO_FOLDER_ID: ${{ github.event.inputs.video_folder_id }}
         VOICE_FOLDER_ID: ${{ github.event.inputs.voice_folder_id }}
+        GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
       run: python stitch.py
