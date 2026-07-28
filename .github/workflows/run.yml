@@ -29,5 +29,7 @@ jobs:
       env:
         VIDEO_FOLDER_ID: ${{ github.event.inputs.video_folder_id }}
         VOICE_FOLDER_ID: ${{ github.event.inputs.voice_folder_id }}
-        GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+        GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+        GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
       run: python stitch.py
