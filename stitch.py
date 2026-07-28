@@ -1,9 +1,8 @@
 import os
-import json
 import subprocess
 import requests
 import gdown
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -24,10 +23,12 @@ def download_folder_contents(folder_id, output_dir):
     gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
 def get_drive_service():
-    creds_json = os.environ["GDRIVE_SERVICE_ACCOUNT_JSON"]
-    creds_info = json.loads(creds_json)
-    credentials = service_account.Credentials.from_service_account_info(
-        creds_info,
+    credentials = Credentials(
+        None,
+        refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ["GDRIVE_CLIENT_ID"],
+        client_secret=os.environ["GDRIVE_CLIENT_SECRET"],
         scopes=["https://www.googleapis.com/auth/drive"]
     )
     return build("drive", "v3", credentials=credentials)
