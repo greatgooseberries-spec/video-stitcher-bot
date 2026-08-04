@@ -52,7 +52,7 @@ def upload_to_drive(file_path, folder_id, file_name):
     return file_id, web_link
 
 def notify_n8n(file_id, web_link):
-    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook-test/416a64ff-7e1c-45a3-af73-dc413876305e"
+    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
     payload = {
         "status": "success",
         "message": "Video stitching complete. Ready for YouTube upload!",
