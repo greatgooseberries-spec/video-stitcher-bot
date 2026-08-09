@@ -27,6 +27,29 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def notify_n8n_resume(payload):
+    """
+    POSTs to the n8n Wait node's resume-webhook URL so the paused n8n
+    execution wakes back up and continues the loop. Called exactly once,
+    at the very end of the run — on success OR failure — so a crashed
+    render doesn't just leave n8n hanging until the Wait node times out.
+    """
+    resume_url = os.environ.get("N8N_RESUME_URL")
+    if not resume_url:
+        log("no N8N_RESUME_URL set — skipping resume callback (fine for local/manual runs)")
+        return
+
+    try:
+        r = requests.post(resume_url, json=payload, timeout=30)
+        log(f"resume webhook called -> status {r.status_code}")
+        if r.status_code >= 300:
+            log(f"WARNING: resume webhook returned non-2xx: {r.text[:300]}")
+    except Exception as e:
+        # Don't let a failed callback crash the job after rendering is done —
+        # just log it loudly so it's visible in the Actions run log.
+        log(f"WARNING: failed to call resume webhook: {e}")
+
+
 def download_to(url, path):
     t0 = time.time()
     session = requests.Session()
@@ -215,7 +238,7 @@ def upload_to_drive(service, file_path, file_name, folder_id):
 
 def main():
     scenes = json.loads(os.environ["SCENES_JSON"])
-    
+
     output_folder_id = os.environ.get("OUTPUT_FOLDER_ID") or "1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA"
     default_part = f"part_{scenes[0]['scene_index']:04d}_{scenes[-1]['scene_index']:04d}"
     part_name = os.environ.get("PART_NAME") or default_part
@@ -223,39 +246,68 @@ def main():
     batch_tmp = os.path.join(WORK_DIR, part_name)
     os.makedirs(batch_tmp, exist_ok=True)
 
-    scene_paths = []
-    errors = []
-    for scene in scenes:
-        try:
-            path = render_single_scene(scene, batch_tmp)
-            scene_paths.append(path)
-        except Exception as e:
-            log(f"ERROR rendering scene {scene.get('scene_index')}: {e}")
-            errors.append({"scene_index": scene.get("scene_index"), "error": str(e)})
+    # Everything from here down is wrapped so that no matter how it ends —
+    # clean success, partial scene failures, or a hard crash — we ALWAYS
+    # call the n8n resume webhook exactly once at the end. Otherwise a
+    # failed run just leaves the n8n Wait node hanging until it times out.
+    try:
+        scene_paths = []
+        errors = []
+        for scene in scenes:
+            try:
+                path = render_single_scene(scene, batch_tmp)
+                scene_paths.append(path)
+            except Exception as e:
+                log(f"ERROR rendering scene {scene.get('scene_index')}: {e}")
+                errors.append({"scene_index": scene.get("scene_index"), "error": str(e)})
 
-    if not scene_paths:
-        log("FATAL: no scenes rendered successfully in this batch")
-        sys.exit(1)
+        if not scene_paths:
+            log("FATAL: no scenes rendered successfully in this batch")
+            notify_n8n_resume({
+                "status": "error",
+                "part_name": part_name,
+                "error": "no scenes rendered successfully",
+                "failed_scenes": errors,
+            })
+            sys.exit(1)
 
-    if errors:
-        log(f"WARNING: {len(errors)} scene(s) failed and were skipped: {errors}")
+        if errors:
+            log(f"WARNING: {len(errors)} scene(s) failed and were skipped: {errors}")
 
-    log(f"concatenating {len(scene_paths)} scenes into {part_name}.mp4")
-    final_path = concat_scenes(scene_paths, batch_tmp, part_name)
+        log(f"concatenating {len(scene_paths)} scenes into {part_name}.mp4")
+        final_path = concat_scenes(scene_paths, batch_tmp, part_name)
 
-    log("uploading finished part to Google Drive")
-    service = get_drive_service()
-    uploaded = upload_to_drive(service, final_path, f"{part_name}.mp4", output_folder_id)
-    log(f"uploaded: {uploaded}")
+        log("uploading finished part to Google Drive")
+        service = get_drive_service()
+        uploaded = upload_to_drive(service, final_path, f"{part_name}.mp4", output_folder_id)
+        log(f"uploaded: {uploaded}")
 
-    github_output = os.environ.get("GITHUB_OUTPUT")
-    if github_output:
-        with open(github_output, "a") as f:
-            f.write(f"file_id={uploaded['id']}\n")
-            f.write(f"file_name={uploaded['name']}\n")
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a") as f:
+                f.write(f"file_id={uploaded['id']}\n")
+                f.write(f"file_name={uploaded['name']}\n")
 
-    shutil.rmtree(batch_tmp, ignore_errors=True)
-    log("done")
+        notify_n8n_resume({
+            "status": "success",
+            "part_name": part_name,
+            "file_id": uploaded["id"],
+            "file_name": uploaded["name"],
+            "failed_scenes": errors,  # partial failures, if any, still surfaced
+        })
+
+    except Exception as e:
+        log(f"FATAL: unhandled error in render job: {e}")
+        notify_n8n_resume({
+            "status": "error",
+            "part_name": part_name,
+            "error": str(e),
+        })
+        raise
+
+    finally:
+        shutil.rmtree(batch_tmp, ignore_errors=True)
+        log("done")
 
 
 if __name__ == "__main__":
