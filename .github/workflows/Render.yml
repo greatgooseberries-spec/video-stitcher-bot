@@ -1,12 +1,13 @@
 name: Batch Scene Renderer
-
 on:
   workflow_dispatch:
     inputs:
       scenes_json:
         description: 'JSON array of scene objects to render in this batch'
         required: true
-
+      resume_url:
+        description: 'n8n Wait-node resume webhook URL to call when this batch finishes (success or failure)'
+        required: true
 jobs:
   render:
     runs-on: ubuntu-latest
@@ -25,6 +26,7 @@ jobs:
     - name: Run Batch Render Script
       env:
         SCENES_JSON: ${{ github.event.inputs.scenes_json }}
+        N8N_RESUME_URL: ${{ github.event.inputs.resume_url }}
         OUTPUT_FOLDER_ID: '1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA'
         GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
         GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
