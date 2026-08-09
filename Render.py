@@ -1,39 +1,3 @@
-"""
-Batch Scene Renderer — GitHub Actions version
-------------------------------------------------
-Replaces the /render-scene + /concat-range endpoints from the PythonAnywhere
-Flask app for ONE BATCH of scenes at a time. Runs inside a GitHub Actions
-runner (dispatched by n8n), renders every scene in the batch, concatenates
-them into a single "part" video, and uploads that part straight to Google
-Drive.
-
-All rendering logic (zoom/pan, character overlay compositing, crossfades,
-pulse animation, encoding settings) is copied UNCHANGED from the original
-Flask app's /render-scene and /concat-range endpoints. Video quality/encoding
-(libx264, crf=18, preset=medium, yuv420p, aac 192k) is intentionally left
-exactly as-is.
-
-Expected environment variables:
-  SCENES_JSON        - JSON array of scene objects, each:
-                        {
-                          "scene_index": int,
-                          "background_url": str,
-                          "character_urls": [str, ...]  (optional, default []),
-                          "audio_url": str               (optional),
-                          "duration": float               (optional, used if no audio_url)
-                        }
-                        Exactly one of audio_url / duration must be given per scene,
-                        same contract as the original /render-scene endpoint.
-  OUTPUT_FOLDER_ID    - Google Drive folder ID to upload the finished part video to
-  PART_NAME           - filename (without extension) for the finished part, e.g. "part_0000_0019"
-  GDRIVE_CLIENT_ID / GDRIVE_CLIENT_SECRET / GDRIVE_REFRESH_TOKEN - same Drive OAuth
-                        secrets already used by stitch.py in this repo
-
-Writes GITHUB_OUTPUT keys: file_id, file_name, download_url  (so later steps /
-n8n can reference them if ever needed, even though n8n's "wait for completion"
-dispatch doesn't require it for the folder-scan based stitching flow).
-"""
-
 import os
 import re
 import sys
@@ -63,10 +27,6 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Copied verbatim from the Flask app's download_to() — handles Google Drive's
-# "can't scan large file for viruses" confirm-token redirect.
-# ---------------------------------------------------------------------------
 def download_to(url, path):
     t0 = time.time()
     session = requests.Session()
@@ -102,12 +62,6 @@ def download_to(url, path):
     return path
 
 
-# ---------------------------------------------------------------------------
-# Copied/adapted from the Flask app's /render-scene handler. Same effect
-# logic (zoom/pan, darken overlay, character placement, crossfade, pulse),
-# same encoder settings. Only change: writes to a local batch work dir and
-# returns a path instead of a Flask response.
-# ---------------------------------------------------------------------------
 def render_single_scene(scene, batch_tmp):
     scene_index = int(scene["scene_index"])
     background_url = scene["background_url"]
@@ -148,8 +102,8 @@ def render_single_scene(scene, batch_tmp):
         )
 
         darken_overlay = (ColorClip(size=RESOLUTION, color=(0, 0, 0))
-                          .set_opacity(0.20)
-                          .set_duration(duration))
+                         .set_opacity(0.20)
+                         .set_duration(duration))
 
         layers = [bg_clip, darken_overlay]
         num_chars = len(character_urls)
@@ -217,10 +171,6 @@ def render_single_scene(scene, batch_tmp):
         shutil.rmtree(scene_tmp, ignore_errors=True)
 
 
-# ---------------------------------------------------------------------------
-# Copied from /concat-range — same re-encode settings (crf=18, preset=medium,
-# aac 192k, yuv420p) so quality matches the rest of the pipeline exactly.
-# ---------------------------------------------------------------------------
 def concat_scenes(scene_paths, batch_tmp, part_name):
     list_path = os.path.join(batch_tmp, f"{part_name}_list.txt")
     with open(list_path, "w") as f:
@@ -265,8 +215,10 @@ def upload_to_drive(service, file_path, file_name, folder_id):
 
 def main():
     scenes = json.loads(os.environ["SCENES_JSON"])
-    output_folder_id = os.environ["OUTPUT_FOLDER_ID"]
-    part_name = os.environ.get("PART_NAME", f"part_{scenes[0]['scene_index']}_{scenes[-1]['scene_index']}")
+    
+    output_folder_id = os.environ.get("OUTPUT_FOLDER_ID") or "1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA"
+    default_part = f"part_{scenes[0]['scene_index']:04d}_{scenes[-1]['scene_index']:04d}"
+    part_name = os.environ.get("PART_NAME") or default_part
 
     batch_tmp = os.path.join(WORK_DIR, part_name)
     os.makedirs(batch_tmp, exist_ok=True)
