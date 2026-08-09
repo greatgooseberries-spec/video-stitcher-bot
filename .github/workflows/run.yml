@@ -1,17 +1,19 @@
-name: Automated Video Stitcher
+name: Batch Scene Renderer
 on:
   workflow_dispatch:
     inputs:
-      video_folder_id:
-        description: 'Google Drive Video Clips Folder ID'
+      scenes_json:
+        description: 'JSON array of scene objects to render in this batch'
+        required: true
+      output_folder_id:
+        description: 'Google Drive folder ID to upload the finished part video to'
         required: true
         default: '1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA'
-      voice_folder_id:
-        description: 'Google Drive Voice Folder ID'
+      part_name:
+        description: 'Filename (no extension) for the finished part, e.g. part_0000_0019'
         required: true
-        default: '1ph8ZfknTc5N5GGVkCW8rHQOS_NAFgG39'
 jobs:
-  build:
+  render:
     runs-on: ubuntu-latest
     steps:
     - name: Check out repository
@@ -24,12 +26,13 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg
-        pip install gdown requests google-api-python-client google-auth
-    - name: Run Python Stitching Script
+        pip install moviepy==1.0.3 imageio_ffmpeg requests Pillow==9.5.0 numpy google-api-python-client google-auth
+    - name: Run Batch Render Script
       env:
-        VIDEO_FOLDER_ID: ${{ github.event.inputs.video_folder_id }}
-        VOICE_FOLDER_ID: ${{ github.event.inputs.voice_folder_id }}
+        SCENES_JSON: ${{ github.event.inputs.scenes_json }}
+        OUTPUT_FOLDER_ID: ${{ github.event.inputs.output_folder_id }}
+        PART_NAME: ${{ github.event.inputs.part_name }}
         GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
         GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
         GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
-      run: python stitch.py
+      run: python render.py
