@@ -76,10 +76,13 @@ def download_file(file_id, dest_path, retries=3):
     for attempt in range(1, retries + 1):
         try:
             fh = io.FileIO(dest_path, "wb")
-            downloader = MediaIoBaseDownload(fh, request)
+            # Larger chunk size (10MB) means fewer HTTP requests per file,
+            # which helps avoid tripping Drive's per-100-second request quota
+            # when downloading hundreds of files back to back.
+            downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
             done = False
             while not done:
-                status, done = downloader.next_chunk()
+                status, done = downloader.next_chunk(num_retries=2)
             fh.close()
             return
         except Exception as e:
@@ -99,6 +102,7 @@ def download_folder_contents(folder_id, output_dir):
         dest_path = os.path.join(output_dir, f["name"])
         print(f"[{i}/{len(files)}] Downloading {f['name']} ({f['id']})")
         download_file(f["id"], dest_path)
+        time.sleep(0.3)  # small pacing delay to avoid tripping Drive's per-100s rate quota
 
     print(f"Downloading contents from {folder_id} completed")
 
