@@ -165,14 +165,28 @@ def main():
     ])
 
     audio_file = None
+    known_audio_ext = (".mp3", ".wav", ".m4a")
     for root, dirs, files in os.walk("voice_downloads"):
         for file in files:
-            if file.lower().endswith((".mp3", ".wav", ".m4a")):
+            if file.lower().endswith(known_audio_ext):
                 audio_file = os.path.join(root, file)
+                break
+        if audio_file:
+            break
+
+    # Fallback: the voice folder should only ever contain the single master
+    # narration file. If it has no recognizable extension (e.g. uploaded as
+    # "full_voice" with no suffix), just take whatever single file is there.
+    if not audio_file:
+        for root, dirs, files in os.walk("voice_downloads"):
+            if files:
+                audio_file = os.path.join(root, files[0])
                 break
 
     if not audio_file:
         raise RuntimeError("No audio file found in the voice folder!")
+
+    print(f"Using audio file: {audio_file}")
 
     print("Merging video with master audio and padding end if audio is longer...")
     run_cmd([
