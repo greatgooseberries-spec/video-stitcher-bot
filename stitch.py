@@ -1,11 +1,17 @@
 import os
 import io
 import time
+import socket
 import subprocess
 import requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+# Global socket timeout (seconds) so a stalled connection fails instead of
+# hanging forever. This makes downloads actually hit our retry logic instead
+# of sitting stuck on a dead connection.
+socket.setdefaulttimeout(60)
 
 DEST_FOLDER_ID = "1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
 
