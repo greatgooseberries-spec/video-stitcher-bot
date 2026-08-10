@@ -149,7 +149,7 @@ def download_folder_contents(folder_id, output_dir):
 
 
 def upload_to_drive(file_path, folder_id, file_name):
-    print(f"Uploading {file_path} to Drive folder {folder_id}...")
+    print(f"Uploading {file_path} to Drive folder {folder_id}...", flush=True)
     service = get_drive_service()
     file_metadata = {
         "name": file_name,
@@ -163,19 +163,31 @@ def upload_to_drive(file_path, folder_id, file_name):
     ).execute()
     file_id = uploaded.get("id")
     web_link = uploaded.get("webViewLink")
-    print(f"Upload complete. File ID: {file_id}")
+
+    # webViewLink can come back empty from the API depending on folder
+    # permissions/timing. Fall back to constructing the standard Drive
+    # view URL directly from the file_id, which always works.
+    if not web_link and file_id:
+        web_link = f"https://drive.google.com/file/d/{file_id}/view"
+        print("webViewLink was empty in the API response, constructed fallback link from file_id.", flush=True)
+
+    print(f"Upload complete. File ID: {file_id}", flush=True)
+    print(f"Video link: {web_link}", flush=True)
     return file_id, web_link
 
 
 def notify_n8n(file_id, web_link):
-    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook-test/416a64ff-7e1c-45a3-af73-dc413876305e"
+    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
+    if not web_link:
+        print("WARNING: web_link is empty/None — n8n will receive a null video_link!", flush=True)
     payload = {
         "status": "success",
         "message": "Video stitching complete. Ready for YouTube upload!",
         "file_id": file_id,
         "video_link": web_link
     }
-    print("Notifying n8n via production webhook...")
+    print(f"Webhook payload: {payload}", flush=True)
+    print("Notifying n8n via production webhook...", flush=True)
     try:
         response = requests.post(webhook_url, json=payload, timeout=30)
         print(f"Webhook response status: {response.status_code}")
@@ -243,17 +255,51 @@ def main():
 
     print(f"Using audio file: {audio_file}", flush=True)
 
+    # --- Subtitles (optional) ---
+    subtitle_file = None
+    subtitles_folder_id = os.getenv("SUBTITLES_FOLDER_ID", "1pMJPxMmkuyMfanNRhcYUz0XHS9MbLTDM")
+    if subtitles_folder_id:
+        print("=== STAGE: Downloading subtitles ===", flush=True)
+        download_folder_contents(subtitles_folder_id, "subtitle_downloads")
+        for root, dirs, files in os.walk("subtitle_downloads"):
+            for file in files:
+                if file.lower().endswith(".srt"):
+                    subtitle_file = os.path.join(root, file)
+                    break
+            if subtitle_file:
+                break
+        if subtitle_file:
+            print(f"Using subtitle file: {subtitle_file}", flush=True)
+        else:
+            print("SUBTITLES_FOLDER_ID was set but no .srt file was found — continuing without subtitles.", flush=True)
+
     print("=== STAGE: Merging video with master audio (this is the slow re-encode step, can take 10-25+ min for a long video) ===", flush=True)
     total_duration = get_duration_seconds("combined_video.mp4")
     if total_duration:
         print(f"Video duration: ~{int(total_duration // 60)} min {int(total_duration % 60)} sec", flush=True)
-    run_ffmpeg_with_progress([
+
+    ffmpeg_cmd = [
         "ffmpeg", "-i", "combined_video.mp4", "-i", audio_file,
+    ]
+
+    if subtitle_file:
+        # Bottom-aligned (Alignment=2), yellow text (&H0000FFFF in ASS BGR
+        # order), medium black outline (Outline=2), font size 32.
+        srt_escaped = subtitle_file.replace("\\", "/").replace(":", "\\:")
+        style = (
+            "FontSize=32,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,"
+            "BorderStyle=1,Outline=2,Shadow=0,Alignment=2,Bold=1"
+        )
+        ffmpeg_cmd += ["-vf", f"subtitles='{srt_escaped}':force_style='{style}'"]
+
+    ffmpeg_cmd += [
         "-map", "0:v:0", "-map", "1:a:0",
         "-shortest",
         "-c:v", "libx264", "-preset", "fast", "-c:a", "aac",
         "final_master_output.mp4"
-    ], total_duration)
+    ]
+
+    run_ffmpeg_with_progress(ffmpeg_cmd, total_duration)
     print("=== STAGE: Stitching complete! ===", flush=True)
 
     print("=== STAGE: Uploading final video to Drive ===", flush=True)
