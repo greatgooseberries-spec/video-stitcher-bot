@@ -44,4 +44,4 @@ jobs:
         with:
           name: render-failure-workdir
           path: work/
-          retention-days: 3[cite: 1]
+          retention-days: 3
