@@ -69,12 +69,12 @@ def list_files_in_folder(folder_id):
 
 
 def download_file(file_id, dest_path, retries=3):
-    """Download a single file via the authenticated Drive API, with basic retry on transient errors."""
+    """Download a single file via the authenticated Drive API, with robust timeout and retry logic."""
     service = get_drive_service()
-    request = service.files().get_media(fileId=file_id)
-
+    
     for attempt in range(1, retries + 1):
         try:
+            request = service.files().get_media(fileId=file_id)
             fh = io.FileIO(dest_path, "wb")
             # Larger chunk size (10MB) means fewer HTTP requests per file,
             # which helps avoid tripping Drive's per-100-second request quota
@@ -82,14 +82,16 @@ def download_file(file_id, dest_path, retries=3):
             downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
             done = False
             while not done:
-                status, done = downloader.next_chunk(num_retries=2)
+                status, done = downloader.next_chunk(num_retries=3)
             fh.close()
             return
         except Exception as e:
             print(f"  Attempt {attempt} failed for {dest_path}: {e}")
+            if os.path.exists(dest_path):
+                os.remove(dest_path)  # Clear partial corrupted downloads
             if attempt == retries:
                 raise
-            time.sleep(2 * attempt)  # simple backoff
+            time.sleep(5 * attempt)  # Backoff delay
 
 
 def download_folder_contents(folder_id, output_dir):
@@ -100,9 +102,17 @@ def download_folder_contents(folder_id, output_dir):
 
     for i, f in enumerate(files, 1):
         dest_path = os.path.join(output_dir, f["name"])
+        
+        # Skip if already downloaded (helps resume if cancelled/timed out)
+        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+            print(f"[{i}/{len(files)}] Skipping {f['name']} (already downloaded)")
+            continue
+
         print(f"[{i}/{len(files)}] Downloading {f['name']} ({f['id']})")
         download_file(f["id"], dest_path)
-        time.sleep(0.3)  # small pacing delay to avoid tripping Drive's per-100s rate quota
+        
+        # Increased pacing delay to 0.8s to avoid Google's rate-limit quota ban
+        time.sleep(0.8)
 
     print(f"Downloading contents from {folder_id} completed")
 
