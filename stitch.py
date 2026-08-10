@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import time
 import socket
 import subprocess
@@ -26,6 +27,46 @@ def run_cmd(command):
         print(f"Error: {result.stderr}")
         raise RuntimeError("FFmpeg command failed.")
     return result.stdout
+
+
+def get_duration_seconds(file_path):
+    """Get media duration in seconds using ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokeys=1", file_path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def run_ffmpeg_with_progress(command, total_duration):
+    """Run an ffmpeg command while streaming stderr and printing a live percentage."""
+    print(f"Running: {' '.join(command)}", flush=True)
+    process = subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        text=True, bufsize=1
+    )
+
+    last_reported = -1
+    time_pattern = re.compile(r"time=(\d+):(\d+):(\d+)\.\d+")
+
+    for line in process.stderr:
+        match = time_pattern.search(line)
+        if match and total_duration:
+            hours, minutes, seconds = map(int, match.groups())
+            current_seconds = hours * 3600 + minutes * 60 + seconds
+            percent = min(100, int((current_seconds / total_duration) * 100))
+            if percent != last_reported and percent % 2 == 0:  # print every ~2%
+                print(f"Progress: {percent}% ({current_seconds}s / {int(total_duration)}s)", flush=True)
+                last_reported = percent
+
+    process.wait()
+    if process.returncode != 0:
+        raise RuntimeError("FFmpeg command failed.")
+    print("Progress: 100% complete", flush=True)
 
 
 def get_drive_service():
@@ -203,13 +244,16 @@ def main():
     print(f"Using audio file: {audio_file}", flush=True)
 
     print("=== STAGE: Merging video with master audio (this is the slow re-encode step, can take 10-25+ min for a long video) ===", flush=True)
-    run_cmd([
+    total_duration = get_duration_seconds("combined_video.mp4")
+    if total_duration:
+        print(f"Video duration: ~{int(total_duration // 60)} min {int(total_duration % 60)} sec", flush=True)
+    run_ffmpeg_with_progress([
         "ffmpeg", "-i", "combined_video.mp4", "-i", audio_file,
         "-map", "0:v:0", "-map", "1:a:0",
         "-shortest",
         "-c:v", "libx264", "-preset", "fast", "-c:a", "aac",
         "final_master_output.mp4"
-    ])
+    ], total_duration)
     print("=== STAGE: Stitching complete! ===", flush=True)
 
     print("=== STAGE: Uploading final video to Drive ===", flush=True)
