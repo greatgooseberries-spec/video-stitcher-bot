@@ -241,7 +241,14 @@ def main():
 
     # Download scenes payload JSON from Google Drive
     scenes_file_path = download(scenes_json_url, WORK_DIR / "scenes.json")
-    scenes = json.loads(scenes_file_path.read_text(encoding="utf-8"))
+    raw = json.loads(scenes_file_path.read_text(encoding="utf-8"))
+    
+    if isinstance(raw, list) and len(raw) == 1 and "scenes_json" in raw[0]:
+        scenes = json.loads(raw[0]["scenes_json"])
+    elif isinstance(raw, dict) and "scenes_json" in raw:
+        scenes = json.loads(raw["scenes_json"])
+    else:
+        scenes = raw
 
     log(f"Job {job_id}: {len(scenes)} scenes")
 
