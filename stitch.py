@@ -1,12 +1,17 @@
 import os
+import io
+import time
 import subprocess
 import requests
-import gdown
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 DEST_FOLDER_ID = "1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
+
+# Reuse a single Drive service for the whole run instead of building a new one per call
+_drive_service = None
+
 
 def run_cmd(command):
     print(f"Running: {' '.join(command)}")
@@ -16,13 +21,12 @@ def run_cmd(command):
         raise RuntimeError("FFmpeg command failed.")
     return result.stdout
 
-def download_folder_contents(folder_id, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"Downloading contents from Google Drive folder ID: {folder_id}")
-    url = f"https://drive.google.com/drive/folders/{folder_id}"
-    gdown.download_folder(url, output=output_dir, quiet=False, use_cookies=False)
 
 def get_drive_service():
+    global _drive_service
+    if _drive_service is not None:
+        return _drive_service
+
     credentials = Credentials(
         None,
         refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"],
@@ -31,7 +35,67 @@ def get_drive_service():
         client_secret=os.environ["GDRIVE_CLIENT_SECRET"],
         scopes=["https://www.googleapis.com/auth/drive"]
     )
-    return build("drive", "v3", credentials=credentials)
+    _drive_service = build("drive", "v3", credentials=credentials)
+    return _drive_service
+
+
+def list_files_in_folder(folder_id):
+    """List all non-trashed files in a Drive folder using the authenticated API (handles pagination)."""
+    service = get_drive_service()
+    files = []
+    page_token = None
+
+    while True:
+        response = service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            spaces="drive",
+            fields="nextPageToken, files(id, name, mimeType)",
+            pageToken=page_token,
+            pageSize=1000
+        ).execute()
+
+        files.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    return files
+
+
+def download_file(file_id, dest_path, retries=3):
+    """Download a single file via the authenticated Drive API, with basic retry on transient errors."""
+    service = get_drive_service()
+    request = service.files().get_media(fileId=file_id)
+
+    for attempt in range(1, retries + 1):
+        try:
+            fh = io.FileIO(dest_path, "wb")
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+            fh.close()
+            return
+        except Exception as e:
+            print(f"  Attempt {attempt} failed for {dest_path}: {e}")
+            if attempt == retries:
+                raise
+            time.sleep(2 * attempt)  # simple backoff
+
+
+def download_folder_contents(folder_id, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Listing contents of Google Drive folder ID: {folder_id}")
+    files = list_files_in_folder(folder_id)
+    print(f"Found {len(files)} files. Downloading via authenticated Drive API...")
+
+    for i, f in enumerate(files, 1):
+        dest_path = os.path.join(output_dir, f["name"])
+        print(f"[{i}/{len(files)}] Downloading {f['name']} ({f['id']})")
+        download_file(f["id"], dest_path)
+
+    print(f"Downloading contents from {folder_id} completed")
+
 
 def upload_to_drive(file_path, folder_id, file_name):
     print(f"Uploading {file_path} to Drive folder {folder_id}...")
@@ -51,6 +115,7 @@ def upload_to_drive(file_path, folder_id, file_name):
     print(f"Upload complete. File ID: {file_id}")
     return file_id, web_link
 
+
 def notify_n8n(file_id, web_link):
     webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
     payload = {
@@ -69,6 +134,7 @@ def notify_n8n(file_id, web_link):
     except requests.exceptions.RequestException as e:
         print(f"Error: Failed to reach n8n webhook: {e}")
         raise
+
 
 def main():
     video_folder_id = os.getenv("VIDEO_FOLDER_ID", "1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA")
@@ -120,6 +186,7 @@ def main():
 
     file_id, web_link = upload_to_drive("final_master_output.mp4", DEST_FOLDER_ID, "full story.mp4")
     notify_n8n(file_id, web_link)
+
 
 if __name__ == "__main__":
     main()
