@@ -287,7 +287,7 @@ def main():
         # order), medium black outline (Outline=2), font size 32.
         srt_escaped = subtitle_file.replace("\\", "/").replace(":", "\\:")
         style = (
-            "FontSize=32,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,"
+            "FontSize=16,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,"
             "BorderStyle=1,Outline=2,Shadow=0,Alignment=2,Bold=1"
         )
         ffmpeg_cmd += ["-vf", f"subtitles='{srt_escaped}':force_style='{style}'"]
