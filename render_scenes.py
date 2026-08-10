@@ -135,7 +135,6 @@ def render_scene_clip(scene: dict, audio_path: Path, out_path: Path):
     start = float(scene["start"])
 
     total_frames = max(1, round(duration * FPS))
-    # Ken Burns: slow zoom in, capped, matches the old moviepy per-frame effect
     zoompan = (
         f"zoompan=z='min(zoom+0.0007,1.3)':d={total_frames}:"
         f"s={OUT_W}x{OUT_H}:fps={FPS}"
@@ -237,8 +236,12 @@ def main():
     output_filename = os.environ.get("OUTPUT_FILENAME", f"{job_id}.mp4")
     master_audio_url = os.environ["MASTER_AUDIO_URL"]
     callback_webhook_url = os.environ.get("CALLBACK_WEBHOOK_URL", "")
-    scenes = json.loads(os.environ["SCENES_JSON"])
+    scenes_json_url = os.environ["SCENES_JSON_URL"]
     folder_id = os.environ["GDRIVE_OUTPUT_FOLDER_ID"]
+
+    # Download scenes payload JSON from Google Drive
+    scenes_file_path = download(scenes_json_url, WORK_DIR / "scenes.json")
+    scenes = json.loads(scenes_file_path.read_text(encoding="utf-8"))
 
     log(f"Job {job_id}: {len(scenes)} scenes")
 
