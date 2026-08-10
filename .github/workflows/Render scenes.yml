@@ -3,6 +3,7 @@ name: Render Video From Scenes
 on:
   repository_dispatch:
     types: [render_video_job]
+    
 
 jobs:
   render:
