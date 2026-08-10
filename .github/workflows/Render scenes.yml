@@ -30,7 +30,7 @@ jobs:
           OUTPUT_FILENAME: ${{ github.event.client_payload.output_filename }}
           MASTER_AUDIO_URL: ${{ github.event.client_payload.master_audio_url }}
           CALLBACK_WEBHOOK_URL: ${{ github.event.client_payload.callback_webhook_url }}
-          SCENES_JSON: ${{ github.event.client_payload.scenes_json }}
+          SCENES_JSON_URL: ${{ github.event.client_payload.scenes_json_url }}
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
           GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
@@ -43,4 +43,4 @@ jobs:
         with:
           name: render-failure-workdir
           path: work/
-          retention-days: 3
+          retention-days: 3[cite: 1]
