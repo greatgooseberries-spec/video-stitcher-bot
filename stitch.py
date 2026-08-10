@@ -69,12 +69,12 @@ def list_files_in_folder(folder_id):
 
 
 def download_file(file_id, dest_path, retries=3):
-    """Download a single file via the authenticated Drive API, with robust timeout and retry logic."""
+    """Download a single file via the authenticated Drive API, with basic retry on transient errors."""
     service = get_drive_service()
-    
+    request = service.files().get_media(fileId=file_id)
+
     for attempt in range(1, retries + 1):
         try:
-            request = service.files().get_media(fileId=file_id)
             fh = io.FileIO(dest_path, "wb")
             # Larger chunk size (10MB) means fewer HTTP requests per file,
             # which helps avoid tripping Drive's per-100-second request quota
@@ -82,16 +82,14 @@ def download_file(file_id, dest_path, retries=3):
             downloader = MediaIoBaseDownload(fh, request, chunksize=10 * 1024 * 1024)
             done = False
             while not done:
-                status, done = downloader.next_chunk(num_retries=3)
+                status, done = downloader.next_chunk(num_retries=2)
             fh.close()
             return
         except Exception as e:
             print(f"  Attempt {attempt} failed for {dest_path}: {e}")
-            if os.path.exists(dest_path):
-                os.remove(dest_path)  # Clear partial corrupted downloads
             if attempt == retries:
                 raise
-            time.sleep(5 * attempt)  # Backoff delay
+            time.sleep(2 * attempt)  # simple backoff
 
 
 def download_folder_contents(folder_id, output_dir):
@@ -102,19 +100,11 @@ def download_folder_contents(folder_id, output_dir):
 
     for i, f in enumerate(files, 1):
         dest_path = os.path.join(output_dir, f["name"])
-        
-        # Skip if already downloaded (helps resume if cancelled/timed out)
-        if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-            print(f"[{i}/{len(files)}] Skipping {f['name']} (already downloaded)")
-            continue
-
-        print(f"[{i}/{len(files)}] Downloading {f['name']} ({f['id']})")
+        print(f"[{i}/{len(files)}] Downloading {f['name']} ({f['id']})", flush=True)
         download_file(f["id"], dest_path)
-        
-        # Increased pacing delay to 0.8s to avoid Google's rate-limit quota ban
-        time.sleep(0.8)
+        time.sleep(0.3)  # small pacing delay to avoid tripping Drive's per-100s rate quota
 
-    print(f"Downloading contents from {folder_id} completed")
+    print(f"Downloading contents from {folder_id} completed", flush=True)
 
 
 def upload_to_drive(file_path, folder_id, file_name):
@@ -160,7 +150,9 @@ def main():
     video_folder_id = os.getenv("VIDEO_FOLDER_ID", "1G9Gmc-VeAzy13bAO95xW9go7Z43R-HAA")
     voice_folder_id = os.getenv("VOICE_FOLDER_ID", "1ph8ZfknTc5N5GGVkCW8rHQOS_NAFgG39")
 
+    print("=== STAGE: Downloading video parts ===", flush=True)
     download_folder_contents(video_folder_id, "video_downloads")
+    print("=== STAGE: Downloading voice track ===", flush=True)
     download_folder_contents(voice_folder_id, "voice_downloads")
 
     video_files = []
@@ -173,16 +165,18 @@ def main():
     if not video_files:
         raise RuntimeError("No video parts found in the downloaded folder!")
 
+    print(f"=== STAGE: Preparing to concatenate {len(video_files)} video parts ===", flush=True)
     list_filename = "file_list.txt"
     with open(list_filename, "w") as f:
         for vf in video_files:
             f.write(f"file '{os.path.abspath(vf)}'\n")
 
-    print("Concatenating video parts together...")
+    print("=== STAGE: Concatenating video parts together (should be fast, no re-encode) ===", flush=True)
     run_cmd([
         "ffmpeg", "-f", "concat", "-safe", "0",
         "-i", list_filename, "-c", "copy", "combined_video.mp4"
     ])
+    print("=== STAGE: Concatenation complete ===", flush=True)
 
     audio_file = None
     known_audio_ext = (".mp3", ".wav", ".m4a")
@@ -206,9 +200,9 @@ def main():
     if not audio_file:
         raise RuntimeError("No audio file found in the voice folder!")
 
-    print(f"Using audio file: {audio_file}")
+    print(f"Using audio file: {audio_file}", flush=True)
 
-    print("Merging video with master audio and padding end if audio is longer...")
+    print("=== STAGE: Merging video with master audio (this is the slow re-encode step, can take 10-25+ min for a long video) ===", flush=True)
     run_cmd([
         "ffmpeg", "-i", "combined_video.mp4", "-i", audio_file,
         "-map", "0:v:0", "-map", "1:a:0",
@@ -216,7 +210,9 @@ def main():
         "-c:v", "libx264", "-preset", "fast", "-c:a", "aac",
         "final_master_output.mp4"
     ])
-    print("Stitching complete!")
+    print("=== STAGE: Stitching complete! ===", flush=True)
+
+    print("=== STAGE: Uploading final video to Drive ===", flush=True)
 
     file_id, web_link = upload_to_drive("final_master_output.mp4", DEST_FOLDER_ID, "full story.mp4")
     notify_n8n(file_id, web_link)
