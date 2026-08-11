@@ -18,8 +18,14 @@ socket.setdefaulttimeout(60)
 
 DEST_FOLDER_ID = "1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
 
-# Reuse a single Drive service for the whole run instead of building a new one per call
+# TODO: replace with your actual metadata sheet's ID (the long string in its
+# URL: https://docs.google.com/spreadsheets/d/THIS_PART/edit)
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "PUT_YOUR_SPREADSHEET_ID_HERE")
+
+# Reuse a single service object per API for the whole run instead of rebuilding per call
 _drive_service = None
+_sheets_service = None
+_youtube_service = None
 
 
 def run_cmd(command):
@@ -45,7 +51,13 @@ def get_duration_seconds(file_path):
 
 
 def run_ffmpeg_with_progress(command, total_duration):
-    """Run an ffmpeg command while streaming stderr and printing a live percentage."""
+    """Run an ffmpeg command while streaming stderr and printing a live percentage.
+
+    Keeps a rolling buffer of recent stderr lines so that if ffmpeg fails
+    (including failing immediately, before any time= progress line is ever
+    emitted) we can print the actual ffmpeg error instead of a bare
+    "FFmpeg command failed." with no diagnostic info.
+    """
     print(f"Running: {' '.join(command)}", flush=True)
     process = subprocess.Popen(
         command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -54,8 +66,14 @@ def run_ffmpeg_with_progress(command, total_duration):
 
     last_reported = -1
     time_pattern = re.compile(r"time=(\d+):(\d+):(\d+)\.\d+")
+    recent_lines = []  # rolling buffer of last N stderr lines for error reporting
+    max_buffer = 60
 
     for line in process.stderr:
+        recent_lines.append(line.rstrip())
+        if len(recent_lines) > max_buffer:
+            recent_lines.pop(0)
+
         match = time_pattern.search(line)
         if match and total_duration:
             hours, minutes, seconds = map(int, match.groups())
@@ -67,25 +85,73 @@ def run_ffmpeg_with_progress(command, total_duration):
 
     process.wait()
     if process.returncode != 0:
-        raise RuntimeError("FFmpeg command failed.")
+        print("=== FFmpeg FAILED. Last output from ffmpeg (most recent lines): ===", flush=True)
+        for line in recent_lines:
+            print(line, flush=True)
+        print("=== End of ffmpeg output ===", flush=True)
+        raise RuntimeError(f"FFmpeg command failed with exit code {process.returncode}. See ffmpeg output above for the actual error.")
     print("Progress: 100% complete", flush=True)
 
 
+def build_credentials(client_id_env, client_secret_env, refresh_token_env, scopes):
+    return Credentials(
+        None,
+        refresh_token=os.environ[refresh_token_env],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.environ[client_id_env],
+        client_secret=os.environ[client_secret_env],
+        scopes=scopes
+    )
+
+
 def get_drive_service():
+    """Drive + Sheets both live on the 'gg' account, using GDRIVE_REFRESH_TOKEN."""
     global _drive_service
     if _drive_service is not None:
         return _drive_service
 
-    credentials = Credentials(
-        None,
-        refresh_token=os.environ["GDRIVE_REFRESH_TOKEN"],
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["GDRIVE_CLIENT_ID"],
-        client_secret=os.environ["GDRIVE_CLIENT_SECRET"],
-        scopes=["https://www.googleapis.com/auth/drive"]
+    credentials = build_credentials(
+        "GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET", "GDRIVE_REFRESH_TOKEN",
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets.readonly"
+        ]
     )
     _drive_service = build("drive", "v3", credentials=credentials)
     return _drive_service
+
+
+def get_sheets_service():
+    """Same 'gg' account credentials as Drive, different API surface (Sheets v4)."""
+    global _sheets_service
+    if _sheets_service is not None:
+        return _sheets_service
+
+    credentials = build_credentials(
+        "GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET", "GDRIVE_REFRESH_TOKEN",
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets.readonly"
+        ]
+    )
+    _sheets_service = build("sheets", "v4", credentials=credentials)
+    return _sheets_service
+
+
+def get_youtube_service():
+    """YouTube channel lives on the 'im' account, using YOUTUBE_REFRESH_TOKEN.
+    Reuses the same OAuth client (GDRIVE_CLIENT_ID/SECRET) — only the refresh
+    token differs, since refresh tokens (not clients) are tied to an account."""
+    global _youtube_service
+    if _youtube_service is not None:
+        return _youtube_service
+
+    credentials = build_credentials(
+        "GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN",
+        scopes=["https://www.googleapis.com/auth/youtube.upload"]
+    )
+    _youtube_service = build("youtube", "v3", credentials=credentials)
+    return _youtube_service
 
 
 def list_files_in_folder(folder_id):
@@ -216,15 +282,118 @@ def upload_to_drive(file_path, folder_id, file_name, max_attempts=5):
     raise RuntimeError(f"Upload to Drive failed after {max_attempts} attempts: {last_error}")
 
 
-def notify_n8n(file_id, web_link):
+def read_video_metadata(spreadsheet_id, cell_range="Sheet1!A2:C2"):
+    """
+    Read title/description/tags from the single live row in the metadata
+    sheet. The sheet only ever holds one row (overwritten each run), so we
+    always read the same fixed range rather than searching for a row.
+
+    Falls back to generic placeholder metadata (never crashes the pipeline)
+    if the sheet is unreachable or the row is empty/missing — a stale or
+    missing spreadsheet shouldn't block an already-rendered video from
+    being uploaded.
+    """
+    fallback_title = f"Story Video - {time.strftime('%Y-%m-%d %H:%M')}"
+    try:
+        service = get_sheets_service()
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=cell_range
+        ).execute()
+        rows = result.get("values", [])
+        row = rows[0] if rows else []
+
+        title = row[0].strip() if len(row) > 0 and row[0].strip() else fallback_title
+        description = row[1].strip() if len(row) > 1 else ""
+        tags_raw = row[2].strip() if len(row) > 2 else ""
+
+        # Tags column has been seen both comma-separated and space-separated —
+        # split on either so it works regardless of which format is used.
+        tags = [t for t in re.split(r"[,\s]+", tags_raw) if t]
+
+        print(f"Metadata read from sheet — title: {title!r}, {len(tags)} tags", flush=True)
+        return title, description, tags
+
+    except Exception as e:
+        print(f"WARNING: Failed to read metadata sheet ({e}). Using fallback title.", flush=True)
+        return fallback_title, "", []
+
+
+def upload_video_to_youtube(file_path, title, description, tags, privacy_status="private",
+                             category_id="22", max_attempts=5):
+    """
+    Upload the finished video directly to YouTube from the local file on the
+    runner — bypasses n8n entirely so it never has to load a multi-GB file
+    into memory.
+
+    NOTE: if the OAuth app (stitcher-desktop-client) hasn't completed
+    Google's API verification/audit, YouTube forces uploaded videos to
+    'private' regardless of what privacy_status is requested here. That's a
+    platform policy on unverified apps, not a bug in this code.
+    """
+    print(f"Uploading to YouTube: {title!r} (privacy={privacy_status})", flush=True)
+    service = get_youtube_service()
+
+    body = {
+        "snippet": {
+            "title": title[:100],            # YouTube's hard title limit
+            "description": description[:5000],  # YouTube's hard description limit
+            "tags": tags[:500],
+            "categoryId": category_id
+        },
+        "status": {
+            "privacyStatus": privacy_status,
+            "selfDeclaredMadeForKids": False
+        }
+    }
+
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            media = MediaFileUpload(
+                file_path,
+                mimetype="video/mp4",
+                resumable=True,
+                chunksize=10 * 1024 * 1024
+            )
+            request = service.videos().insert(
+                part="snippet,status",
+                body=body,
+                media_body=media
+            )
+            response = request.execute(num_retries=10)
+            video_id = response.get("id")
+            video_url = f"https://youtu.be/{video_id}" if video_id else None
+
+            print(f"YouTube upload complete. Video ID: {video_id}", flush=True)
+            print(f"YouTube link: {video_url}", flush=True)
+            return video_id, video_url
+
+        except (HttpError, ssl.SSLError, socket.error, ConnectionError, TimeoutError, OSError) as e:
+            last_error = e
+            print(f"  YouTube upload attempt {attempt}/{max_attempts} failed: {e}", flush=True)
+            if attempt == max_attempts:
+                break
+            sleep_time = min(60, 5 * (2 ** (attempt - 1)))
+            print(f"  Retrying YouTube upload in {sleep_time}s...", flush=True)
+            time.sleep(sleep_time)
+
+    raise RuntimeError(f"YouTube upload failed after {max_attempts} attempts: {last_error}")
+
+
+def notify_n8n(file_id, web_link, youtube_video_id=None, youtube_url=None):
     webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
     if not web_link:
         print("WARNING: web_link is empty/None — n8n will receive a null video_link!", flush=True)
     payload = {
         "status": "success",
-        "message": "Video stitching complete. Ready for YouTube upload!",
+        # Kept unchanged for backward compatibility with any existing n8n
+        # nodes that already reference these two field names.
+        "message": "Video stitching complete. Uploaded to Drive and YouTube!",
         "file_id": file_id,
-        "video_link": web_link
+        "video_link": web_link,
+        # New fields for the direct YouTube upload.
+        "youtube_video_id": youtube_video_id,
+        "youtube_url": youtube_url
     }
     print(f"Webhook payload: {payload}", flush=True)
     print("Notifying n8n via production webhook...", flush=True)
@@ -237,6 +406,25 @@ def notify_n8n(file_id, web_link):
     except requests.exceptions.RequestException as e:
         print(f"Error: Failed to reach n8n webhook: {e}")
         raise
+
+
+def notify_n8n_failure(error_message, stage="unknown"):
+    """Ping the same n8n webhook with an error status so a crashed run is never silent."""
+    webhook_url = "https://lordkiwi.app.n8n.cloud/webhook/416a64ff-7e1c-45a3-af73-dc413876305e"
+    payload = {
+        "status": "error",
+        "message": f"Video stitching FAILED at stage '{stage}': {error_message}",
+        "file_id": None,
+        "video_link": None
+    }
+    print(f"Notifying n8n of FAILURE via production webhook... payload={payload}", flush=True)
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=30)
+        print(f"Failure webhook response status: {response.status_code}", flush=True)
+    except requests.exceptions.RequestException as e:
+        # At this point we're already failing - don't let a webhook error
+        # mask the original exception, just log it.
+        print(f"Also failed to reach n8n failure webhook: {e}", flush=True)
 
 
 def main():
@@ -342,11 +530,28 @@ def main():
     run_ffmpeg_with_progress(ffmpeg_cmd, total_duration)
     print("=== STAGE: Stitching complete! ===", flush=True)
 
-    print("=== STAGE: Uploading final video to Drive ===", flush=True)
+    print("=== STAGE: Reading video metadata from sheet ===", flush=True)
+    title, description, tags = read_video_metadata(SPREADSHEET_ID)
 
+    print("=== STAGE: Uploading final video to YouTube ===", flush=True)
+    youtube_video_id, youtube_url = upload_video_to_youtube(
+        "final_master_output.mp4", title, description, tags
+    )
+
+    print("=== STAGE: Uploading final video to Drive (backup) ===", flush=True)
     file_id, web_link = upload_to_drive("final_master_output.mp4", DEST_FOLDER_ID, "full story.mp4")
-    notify_n8n(file_id, web_link)
+
+    notify_n8n(file_id, web_link, youtube_video_id, youtube_url)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    import traceback
+
+    try:
+        main()
+    except Exception as e:
+        print("=== STAGE: FATAL ERROR - pipeline did not complete ===", flush=True)
+        traceback.print_exc()
+        notify_n8n_failure(str(e))
+        sys.exit(1)
