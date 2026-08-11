@@ -32,4 +32,5 @@ jobs:
         GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
         GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
         GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+        YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
       run: python -u stitch.py
