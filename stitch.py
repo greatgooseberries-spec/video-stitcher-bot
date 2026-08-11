@@ -3,11 +3,13 @@ import io
 import re
 import time
 import socket
+import ssl
 import subprocess
 import requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 
 # Global socket timeout (seconds) so a stalled connection fails instead of
 # hanging forever. This makes downloads actually hit our retry logic instead
@@ -148,32 +150,70 @@ def download_folder_contents(folder_id, output_dir):
     print(f"Downloading contents from {folder_id} completed", flush=True)
 
 
-def upload_to_drive(file_path, folder_id, file_name):
+def upload_to_drive(file_path, folder_id, file_name, max_attempts=5):
+    """
+    Upload a file to Drive as a resumable, chunked upload with retries.
+
+    Two layers of resilience:
+      1. `execute(num_retries=...)` — the googleapiclient library retries
+         individual failed chunks internally (with backoff) for transient
+         errors, including ssl.SSLError/SSLEOFError, socket errors, and
+         common transient HTTP status codes. This is what was missing
+         before: resumable=True alone does nothing without num_retries.
+      2. An outer attempt loop — in case the resumable session itself dies
+         completely (e.g. network drops for an extended period), we rebuild
+         the upload object and start a fresh resumable session rather than
+         failing the whole multi-hour pipeline run.
+    """
     print(f"Uploading {file_path} to Drive folder {folder_id}...", flush=True)
     service = get_drive_service()
     file_metadata = {
         "name": file_name,
         "parents": [folder_id]
     }
-    media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
-    uploaded = service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields="id, webViewLink"
-    ).execute()
-    file_id = uploaded.get("id")
-    web_link = uploaded.get("webViewLink")
 
-    # webViewLink can come back empty from the API depending on folder
-    # permissions/timing. Fall back to constructing the standard Drive
-    # view URL directly from the file_id, which always works.
-    if not web_link and file_id:
-        web_link = f"https://drive.google.com/file/d/{file_id}/view"
-        print("webViewLink was empty in the API response, constructed fallback link from file_id.", flush=True)
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Explicit chunksize (10MB) so this actually uploads in resumable
+            # pieces instead of one giant request that has to be restarted
+            # from zero on any interruption.
+            media = MediaFileUpload(
+                file_path,
+                mimetype="video/mp4",
+                resumable=True,
+                chunksize=10 * 1024 * 1024
+            )
+            uploaded = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id, webViewLink"
+            ).execute(num_retries=10)
 
-    print(f"Upload complete. File ID: {file_id}", flush=True)
-    print(f"Video link: {web_link}", flush=True)
-    return file_id, web_link
+            file_id = uploaded.get("id")
+            web_link = uploaded.get("webViewLink")
+
+            # webViewLink can come back empty from the API depending on folder
+            # permissions/timing. Fall back to constructing the standard Drive
+            # view URL directly from the file_id, which always works.
+            if not web_link and file_id:
+                web_link = f"https://drive.google.com/file/d/{file_id}/view"
+                print("webViewLink was empty in the API response, constructed fallback link from file_id.", flush=True)
+
+            print(f"Upload complete. File ID: {file_id}", flush=True)
+            print(f"Video link: {web_link}", flush=True)
+            return file_id, web_link
+
+        except (HttpError, ssl.SSLError, socket.error, ConnectionError, TimeoutError, OSError) as e:
+            last_error = e
+            print(f"  Upload attempt {attempt}/{max_attempts} failed: {e}", flush=True)
+            if attempt == max_attempts:
+                break
+            sleep_time = min(60, 5 * (2 ** (attempt - 1)))  # 5s, 10s, 20s, 40s, capped at 60s
+            print(f"  Retrying upload in {sleep_time}s...", flush=True)
+            time.sleep(sleep_time)
+
+    raise RuntimeError(f"Upload to Drive failed after {max_attempts} attempts: {last_error}")
 
 
 def notify_n8n(file_id, web_link):
