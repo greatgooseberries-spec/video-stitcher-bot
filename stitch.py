@@ -20,7 +20,7 @@ DEST_FOLDER_ID = "1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
 
 # TODO: replace with your actual metadata sheet's ID (the long string in its
 # URL: https://docs.google.com/spreadsheets/d/THIS_PART/edit)
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "PUT_YOUR_SPREADSHEET_ID_HERE")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1nYmebfH3jo7mxxnCI2ajx_ZDTjs9NrdBTkP-FN65O9s")
 
 # Reuse a single service object per API for the whole run instead of rebuilding per call
 _drive_service = None
