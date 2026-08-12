@@ -50,39 +50,69 @@ def notify_n8n_resume(payload):
         log(f"WARNING: failed to call resume webhook: {e}")
 
 
-def download_to(url, path):
+def download_to(url, path, max_retries=4):
+    """
+    Downloads a file with retry + exponential backoff for transient
+    server-side failures (503/502/504/500/429, and connection/timeout
+    errors). Non-retryable errors (e.g. 404, 403) raise immediately.
+    """
     t0 = time.time()
     session = requests.Session()
-    r = session.get(url, stream=True, timeout=60)
-    content_type = r.headers.get("Content-Type", "")
+    RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
-    if "text/html" in content_type:
-        text = r.text
-        match = re.search(r'confirm=([0-9A-Za-z_\-]+)', text)
-        token = match.group(1) if match else None
-        if not token:
-            for k, v in r.cookies.items():
-                if k.startswith("download_warning"):
-                    token = v
-                    break
-        if token:
-            sep = "&" if "?" in url else "?"
-            retry_url = f"{url}{sep}confirm={token}"
-            r = session.get(retry_url, stream=True, timeout=60)
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = session.get(url, stream=True, timeout=60)
             content_type = r.headers.get("Content-Type", "")
 
-    r.raise_for_status()
-    with open(path, "wb") as f:
-        for chunk in r.iter_content(1 << 16):
-            f.write(chunk)
+            if "text/html" in content_type:
+                text = r.text
+                match = re.search(r'confirm=([0-9A-Za-z_\-]+)', text)
+                token = match.group(1) if match else None
+                if not token:
+                    for k, v in r.cookies.items():
+                        if k.startswith("download_warning"):
+                            token = v
+                            break
+                if token:
+                    sep = "&" if "?" in url else "?"
+                    retry_url = f"{url}{sep}confirm={token}"
+                    r = session.get(retry_url, stream=True, timeout=60)
+                    content_type = r.headers.get("Content-Type", "")
 
-    size_kb = os.path.getsize(path) / 1024
-    log(f"downloaded {url[:60]}... -> {size_kb:.1f}KB, content-type={content_type}, took {time.time()-t0:.1f}s")
+            if r.status_code in RETRYABLE_STATUS:
+                raise requests.exceptions.HTTPError(
+                    f"{r.status_code} Server Error (retryable)", response=r
+                )
 
-    if "text/html" in content_type or size_kb < 1:
-        log("WARNING: downloaded file looks suspicious (html or tiny) — likely not the real file")
+            r.raise_for_status()
 
-    return path
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+
+            size_kb = os.path.getsize(path) / 1024
+            log(f"downloaded {url[:60]}... -> {size_kb:.1f}KB, content-type={content_type}, "
+                f"took {time.time()-t0:.1f}s (attempt {attempt})")
+
+            if "text/html" in content_type or size_kb < 1:
+                log("WARNING: downloaded file looks suspicious (html or tiny) — likely not the real file")
+
+            return path
+
+        except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            last_exc = e
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            retryable = status in RETRYABLE_STATUS or status is None  # None = connection/timeout errors
+            if not retryable or attempt == max_retries:
+                raise
+            wait = min(2 ** attempt, 20)  # 2, 4, 8, 16, capped at 20
+            log(f"WARNING: download attempt {attempt}/{max_retries} failed ({e}) — retrying in {wait}s")
+            time.sleep(wait)
+
+    raise last_exc
 
 
 def render_single_scene(scene, batch_tmp):
