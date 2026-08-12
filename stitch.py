@@ -22,6 +22,10 @@ DEST_FOLDER_ID = "1GZrZywT-c4DXIMMLeNuSNfSrjZ7b5aE4"
 # URL: https://docs.google.com/spreadsheets/d/THIS_PART/edit)
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1nYmebfH3jo7mxxnCI2ajx_ZDTjs9NrdBTkP-FN65O9s")
 
+# How much shorter (in seconds) the video is allowed to be than the audio
+# before we bother padding. Sub-second gaps are just encoding/rounding noise.
+PAD_THRESHOLD_SEC = 1.0
+
 # Reuse a single service object per API for the whole run instead of rebuilding per call
 _drive_service = None
 _sheets_service = None
@@ -48,6 +52,102 @@ def get_duration_seconds(file_path):
         return float(result.stdout.strip())
     except (ValueError, TypeError):
         return None
+
+
+def get_video_dimensions_and_fps(file_path):
+    """Reads width/height/frame-rate off a video file's first video stream,
+    so a black padding clip can be generated that matches it exactly."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height,r_frame_rate",
+         "-of", "csv=p=0", file_path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        width_str, height_str, fps_str = result.stdout.strip().split(",")
+        return int(width_str), int(height_str), fps_str
+    except Exception:
+        return None, None, None
+
+
+def pad_video_with_black(video_path, pad_duration, output_path):
+    """
+    Appends a black screen of `pad_duration` seconds onto the end of
+    `video_path`. Used when the rendered video is shorter than the master
+    narration track — instead of letting the final merge step (-shortest)
+    silently cut the audio short, we extend the video so the *entire*
+    narration always has something to play over, even if that's just a
+    black screen for whatever portion is missing.
+
+    This never raises on its own logic — if anything about it fails, the
+    caller falls back to using the original (shorter) video rather than
+    blocking the whole run.
+    """
+    width, height, fps = get_video_dimensions_and_fps(video_path)
+    if not width or not height or not fps:
+        width, height, fps = 1920, 1080, "30"
+        print("WARNING: could not detect video dimensions/fps from the "
+              "combined video — defaulting to 1920x1080@30 for the black pad.", flush=True)
+
+    print(f"Video runs ~{pad_duration:.1f}s shorter than the narration — "
+          f"generating a black screen pad so the full story audio is preserved.", flush=True)
+
+    black_clip = "black_pad.mp4"
+    run_cmd([
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", f"color=c=black:s={width}x{height}:r={fps}:d={pad_duration:.2f}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
+        black_clip
+    ])
+
+    pad_list = "pad_list.txt"
+    with open(pad_list, "w") as f:
+        f.write(f"file '{os.path.abspath(video_path)}'\n")
+        f.write(f"file '{os.path.abspath(black_clip)}'\n")
+
+    run_cmd([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", pad_list, "-c", "copy", output_path
+    ])
+
+    os.remove(pad_list)
+    os.remove(black_clip)
+    print(f"Padded video written to {output_path}", flush=True)
+    return output_path
+
+
+def ensure_video_covers_audio(video_path, audio_path):
+    """
+    Checks the combined video against the narration track. If the video is
+    shorter, pads it with black so the story audio is never truncated.
+    Returns the path to use going forward (the original path if no padding
+    was needed or possible).
+    """
+    video_duration = get_duration_seconds(video_path)
+    audio_duration = get_duration_seconds(audio_path)
+
+    if not video_duration or not audio_duration:
+        print("WARNING: could not determine video/audio duration — skipping "
+              "the shortfall check and continuing with the video as-is.", flush=True)
+        return video_path
+
+    shortfall = audio_duration - video_duration
+    if shortfall <= PAD_THRESHOLD_SEC:
+        print(f"Video ({video_duration:.1f}s) already covers the full narration "
+              f"({audio_duration:.1f}s) — no padding needed.", flush=True)
+        return video_path
+
+    try:
+        # Small buffer on top of the exact shortfall so rounding/frame-boundary
+        # differences can never leave the video a hair short of the audio.
+        pad_duration = shortfall + 0.5
+        padded_path = pad_video_with_black(video_path, pad_duration, "combined_video_padded.mp4")
+        return padded_path
+    except Exception as e:
+        print(f"WARNING: failed to generate black-screen padding ({e}) — "
+              f"continuing with the original (shorter) video instead of "
+              f"failing the whole run.", flush=True)
+        return video_path
 
 
 def run_ffmpeg_with_progress(command, total_duration):
@@ -483,6 +583,16 @@ def main():
 
     print(f"Using audio file: {audio_file}", flush=True)
 
+    # === STAGE: Make sure the video is never shorter than the narration ===
+    # If scenes are missing (failed renders, quota errors, whatever), the
+    # combined video can end up shorter than the master audio track. The
+    # final merge step below uses -shortest, which would otherwise silently
+    # cut the narration off at the video's length — chopping the story in
+    # half with no error anywhere. Instead, pad the video out with a black
+    # screen so the full narration always has something to play over.
+    print("=== STAGE: Checking video length against narration length ===", flush=True)
+    video_for_merge = ensure_video_covers_audio("combined_video.mp4", audio_file)
+
     # --- Subtitles (optional) ---
     subtitle_file = None
     subtitles_folder_id = os.getenv("SUBTITLES_FOLDER_ID", "1pMJPxMmkuyMfanNRhcYUz0XHS9MbLTDM")
@@ -502,12 +612,12 @@ def main():
             print("SUBTITLES_FOLDER_ID was set but no .srt file was found — continuing without subtitles.", flush=True)
 
     print("=== STAGE: Merging video with master audio (this is the slow re-encode step, can take 10-25+ min for a long video) ===", flush=True)
-    total_duration = get_duration_seconds("combined_video.mp4")
+    total_duration = get_duration_seconds(video_for_merge)
     if total_duration:
         print(f"Video duration: ~{int(total_duration // 60)} min {int(total_duration % 60)} sec", flush=True)
 
     ffmpeg_cmd = [
-        "ffmpeg", "-i", "combined_video.mp4", "-i", audio_file,
+        "ffmpeg", "-i", video_for_merge, "-i", audio_file,
     ]
 
     if subtitle_file:
